@@ -14,6 +14,8 @@
 
 `origin` = `allevaton/jira-cli`, `upstream` = `ankitpokhrel/jira-cli`. Work lives on `local`; `main` tracks upstream. `scripts/sync-fork.sh`, run from your work branch, fetches upstream, fast-forwards `main`, pushes it to `origin`, and rebases your branch onto it — bailing if `main` diverged or the tree is dirty. The rebase rewrites history, so follow it with `git push --force-with-lease origin <branch>`. PRs to the original project target upstream `main`.
 
+`local` is personal-only: it carries changes for my own workflow, is not meant for other users, and never goes upstream. A change belongs on `local` unless it's a fix meant for upstream, in which case branch it off `main` instead and PR it to `ankitpokhrel/jira-cli`.
+
 ## Architecture
 
 Three layers, with a hard rule at each seam:

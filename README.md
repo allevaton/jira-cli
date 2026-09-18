@@ -53,6 +53,11 @@ features like issue creation, cloning, linking, ticket transition, and much more
 
 > This tool is heavily inspired by the [GitHub CLI](https://github.com/cli/cli)
 
+> [!IMPORTANT]
+> This is [allevaton/jira-cli](https://github.com/allevaton/jira-cli), a personal fork. The `local` branch carries
+> changes for my own workflow only, is not intended for other users, and isn't supported the way upstream
+> [ankitpokhrel/jira-cli](https://github.com/ankitpokhrel/jira-cli) is. See `CLAUDE.md` for the fork's branch layout.
+
 ## Supported platforms
 > [!NOTE]
 > Some features might work slightly differently in Jira Cloud versus on-premises installations due to the
