@@ -1,83 +1,55 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+`jira-cli` is an interactive Go/Cobra command-line tool for Atlassian Jira, modelled on GitHub's `gh`. It targets two kinds of Jira that differ in API version, text format, and auth — a split that reaches nearly every feature.
 
-## What this is
+## Vocabulary
 
-`jira-cli` is an interactive command-line tool for Atlassian Jira (a Go/Cobra CLI, heavily inspired by GitHub's `gh`). It supports both Jira Cloud and on-premise (Server/Data Center) installations, which differ in API version and data formats — see "Cloud vs. on-premise" below.
-
-## Commands
-
-```sh
-make build      # go build with version ldflags (vendors deps first)
-make install    # go install into $GOPATH/bin
-make lint       # golangci-lint (auto-installs v2.6.2 if missing)
-make test       # go clean -testcache && CGO_ENABLED=1 go test -race ./...
-make ci         # lint + test (what CI runs)
-make jira.server  # docker compose up -d (local Jira for manual testing)
-```
-
-Run a single test:
-```sh
-go test -race ./pkg/jira/ -run TestGetIssue
-go test -race ./internal/query/ -run '^TestIssueGet$'   # anchor the regex to run exactly one test
-```
-
-Tests require `CGO_ENABLED=1` because of the `-race` flag. Dependencies are **vendored** (`vendor/`), so `make deps` (`go mod vendor`) must be run after changing `go.mod`.
+- **Installation type** — which Jira a user is on: `Cloud` or `Local`. `Local` means self-hosted Server/Data Center, *not* localhost or a dev instance. Stored as config key `installation`; it selects API version and body format everywhere.
+- **ADF** (Atlassian Document Format) — Cloud's rich-text JSON representation of issue bodies. `pkg/adf` converts it to and from markdown.
+- **Jira wiki markup** — the plain-text markup `Local` installations use for the same bodies, parsed by `pkg/md/jirawiki`.
+- **Epic field** — the instance-specific `customfield_*` ID behind the human labels "Epic Name" and "Epic Link". Every instance numbers them differently; they are resolved from create metadata, never assumed.
+- **Handle** — an untranslated issue-type name recorded in config (`issue.types.*.handle`). Non-English instances return localised type names, so the handle is what the code matches on.
 
 ## Fork workflow
 
-This is a fork (`origin` = `allevaton/jira-cli`, `upstream` = `ankitpokhrel/jira-cli`). Personal work lives on the `local` branch; `main` tracks upstream. Run `scripts/sync-fork.sh` from your work branch: it fetches `upstream`, fast-forwards `main` to `upstream/main`, pushes `main` to `origin`, then rebases the current branch onto `main` (it bails if `main` diverged or the tree is dirty). Because the rebase rewrites history, update the remote branch afterward with `git push --force-with-lease origin <branch>`. PRs to the original project target upstream `main`.
+`origin` = `allevaton/jira-cli`, `upstream` = `ankitpokhrel/jira-cli`. Work lives on `local`; `main` tracks upstream. `scripts/sync-fork.sh`, run from your work branch, fetches upstream, fast-forwards `main`, pushes it to `origin`, and rebases your branch onto it — bailing if `main` diverged or the tree is dirty. The rebase rewrites history, so follow it with `git push --force-with-lease origin <branch>`. PRs to the original project target upstream `main`.
 
 ## Architecture
 
-The codebase has a strict three-layer separation:
+Three layers, with a hard rule at each seam:
 
-1. **`pkg/jira/`** — the Jira API client and the only place that talks HTTP to Jira. Each file maps to a domain (`issue.go`, `epic.go`, `sprint.go`, `board.go`, `search.go`, `transition.go`, etc.). `client.go` holds the `Client` struct, auth handling (basic / bearer / mtls), error types (`ErrUnexpectedResponse`, `ErrNoResult`), and API version constants (`/rest/api/3` for Cloud, `/rest/api/2` for on-premise, `/rest/agile/1.0` for boards/sprints). `types.go` holds the response structs. This package has **no dependency on Cobra/viper** — it takes a `jira.Config` and is independently testable (see `*_test.go` with `testdata/` fixtures).
+1. **`pkg/jira/`** — the API client, and the only place that speaks HTTP to Jira. It takes a `jira.Config` and knows nothing of Cobra or viper, which is what makes it testable against `testdata/` fixtures. One file per domain; `client.go` holds the `Client`, auth, error types (`ErrUnexpectedResponse`, `ErrNoResult`), and the base-URL constants (`/rest/api/3` Cloud, `/rest/api/2` Local, `/rest/agile/1.0` boards and sprints).
+2. **`internal/`** — everything CLI-shaped. `internal/cmd/<group>/<subcommand>/` mirrors the command tree one directory per command (`jira issue create` → `internal/cmd/issue/create/`), each exposing one `NewCmd<Name>()` wired into its parent up to `internal/cmd/root/`. `internal/query/` turns flags into API params behind the `FlagParser` interface, so query building is testable without a live command. `internal/view/` renders responses, delegating interactive tables to `pkg/tui`.
+3. **`api/`** — the bridge. `api.Client()` assembles a `pkg/jira` client from viper, `.netrc`, and the OS keyring, in that fallback order. Commands call `api.DefaultClient(debug)`.
 
-2. **`internal/`** — everything CLI-specific:
-   - `internal/cmd/<group>/<subcommand>/` — one directory per Cobra command, mirroring the CLI structure (`jira issue create` → `internal/cmd/issue/create/`). Each defines a `NewCmd<Name>()` constructor wired up in the parent's command file, ultimately in `internal/cmd/root/root.go`.
-   - `internal/query/` — translates Cobra flags into API query params. `FlagParser` is an interface wrapping `pflag.FlagSet` so query construction is testable without a real command.
-   - `internal/view/` — renders API responses to the terminal (tables, issue detail views). The interactive table UI delegates to `pkg/tui`.
-   - `internal/config/generator.go` — drives `jira init`, probing the server and writing the YAML config.
-   - `internal/cmdutil/` — shared CLI helpers (`Failed()`, config-home resolution, datetime formatting).
-   - `internal/cmdcommon/` — flag sets shared across create-style commands (`SetCreateFlags`).
+Typical request: `cmd/jira/main.go` → root → subcommand `Run` → `internal/query` → `api.DefaultClient()` → `pkg/jira` → `internal/view`.
 
-3. **`api/client.go`** — a thin singleton bridge. `api.Client()` / `api.DefaultClient()` reads config from viper, the `.netrc` file, and the OS keyring (in that fallback order) and constructs the `pkg/jira` client. Commands call `api.DefaultClient(debug)` rather than building a client themselves.
+### The Proxy seam
 
-### Supporting `pkg/` libraries
-- `pkg/adf/` — converts Atlassian Document Format (Cloud's rich-text JSON) to/from markdown. Cloud issue bodies are ADF; on-premise uses wiki markup.
-- `pkg/md/jirawiki/` — Jira wiki-markup parsing (on-premise text format).
-- `pkg/jql/` — a minimal JQL query builder. **Limitation: it cannot mix AND and OR in one query** and does no syntax validation — the caller must build a valid query.
-- `pkg/tui/` — the interactive terminal UI (tables, previews) built on `tview`/`tcell`. `pkg/tui/primitive/` has custom widgets.
-- `pkg/surveyext/` — extensions to the `survey` prompt library for interactive input.
-- `pkg/netrc/`, `pkg/browser/` — `.netrc` parsing and cross-platform browser opening.
+`api/client.go` exposes a family of **Proxy functions** — `ProxyCreate`, `ProxySearch`, `ProxyGetIssue`, `ProxyGetIssueRaw`, `ProxyAssignIssue`, `ProxyUserSearch`, `ProxyTransitions`, `ProxyWatchIssue`. Each reads `installation` and dispatches to the `…V2` method for `Local` or the v3 method otherwise, defaulting to v3 when the value is unset. Route every version-split call through a Proxy function, and add one when you add a version-split endpoint; calling `c.Create` or `c.Search` directly silently breaks `Local` users.
 
-### Request flow for a typical command
-`cmd/jira/main.go` → `root.NewCmdRoot()` → subcommand `Run` func → parse flags via `internal/query` → `api.DefaultClient()` → `pkg/jira` method → render with `internal/view` (+ `pkg/tui` for interactive output).
+The two search paths differ in shape, not just version: v3 `Search(jql, limit)` hits `/search/jql`, which has no offset parameter at all, while v2 `SearchV2(jql, from, limit)` hits the paginated `/search?startAt=…`. `ProxySearch` accepts `from` and drops it on Cloud. Treat offset pagination as v2-only.
 
-## Cloud vs. on-premise
+## Gotchas
 
-This distinction pervades the code. Config field `installation` is `Cloud` or `Local`. Cloud uses API v3 + ADF rich text; on-premise uses API v2 + wiki markup and an older Agile API. When adding or changing a feature, check whether it behaves differently per installation type and handle both. Auth types also differ: Cloud typically uses `basic` (email + API token), on-premise uses `basic`, `bearer` (PAT), or `mtls`.
+- **The client is a cached singleton, and the first call wins.** `api.Client()` stores it in a package-level `var jiraClient` and returns that on every later call, ignoring the `jira.Config` passed in. Production builds it once; tests needing a distinct config must reset or work around it.
+- **A stale `vendor/` hijacks every `go` command.** `vendor/` is gitignored, but `make build` runs `go mod vendor` first and thereby creates it — and Go auto-switches to `-mod=vendor` whenever it exists. After changing `go.mod`, re-run `make deps`, or plain `go build`/`go test` keeps resolving against the old tree.
+- **`-race` needs CGO, which the Makefile disables globally.** The Makefile exports `CGO_ENABLED ?= 0` for builds and re-enables it only inside `test`. A new make target that runs `go test -race` inherits the `0` and fails to build the race detector.
+- **The JQL builder joins filters only inside `And`/`Or`.** Filters accumulate in a flat slice, and `And(fn)`/`Or(fn)` run the closure then merge what it added with a single separator. Add filters inside the closure (see `internal/query/issue.go`); those left outside reach `compile()` unmerged and are space-joined into invalid JQL. The builder also has no parenthesised grouping and validates nothing.
+- **The jirawiki parser indexes bytes, not runes.** `pkg/md/jirawiki` walks `line[i]` as bytes; multibyte UTF-8 survives only because the code writes bytes straight through. Keep byte semantics when editing it — converting an index to a `rune` corrupts non-ASCII text.
+- **Version vars are empty in source.** `internal/version` ships `Version = "v0.0.0-dev"` and an empty `GitCommit`; real values come from `-ldflags` via `make build`/`make install`. A bare `go build` yielding a dev version is expected.
+- **Datetimes take IANA zone names.** `cmdutil.DateStringToJiraFormatInLocation` resolves through `time.LoadLocation`, which accepts `Europe/Berlin` and rejects offsets like `+05:00`.
+- **Config home follows `XDG_CONFIG_HOME`.** `cmdutil.GetConfigHome()` returns it when set and falls back to `~/.config`; config lands at `<home>/.jira/.config.yml`. Precedence is `--config` > `JIRA_CONFIG_FILE` > that default, and every key is also readable as a `JIRA_`-prefixed env var (viper `AutomaticEnv`). The API token stays out of the config file — it comes from `JIRA_API_TOKEN`, `.netrc`, or the keyring.
 
-## Configuration
+## Working across installation types
 
-Config precedence (handled in `root.go` `init()`): `--config` flag > `JIRA_CONFIG_FILE` env > default `<config-home>/.jira/.config.yml`. All keys are also readable from `JIRA_`-prefixed env vars (viper `AutomaticEnv`). The API token is never stored in the config file — it comes from `JIRA_API_TOKEN`, `.netrc`, or the OS keyring.
+When you add or change a feature, decide how it behaves on each installation type and handle both. Cloud means API v3 and ADF bodies; `Local` means v2, wiki markup, and an older Agile API. Auth types are `basic` (Cloud's usual: email + API token), `bearer` (PAT), `mtls`, and `cf-access` (Cloudflare Access, which wraps the transport in a token-fetching round tripper). Note that `pkg/jira`'s per-request auth switch handles basic, bearer, and mtls — `cf-access` does its work at transport construction instead.
 
-## Common gotchas
-
-- **The API client is a cached singleton.** `api.Client()` stores the client in a package-level `var jiraClient` and returns it on every subsequent call, ignoring the passed-in `jira.Config`. The first call wins. Tests that need different configs (or a fresh client) must account for this; production code only ever builds it once.
-- **Issue creation is version-routed, not endpoint-uniform.** `api.ProxyCreate` dispatches to the v2 or v3 POST `/issue` endpoint based on the `installation` config value, **defaulting to v3 when unset**. Don't call a fixed-version create path directly — go through `ProxyCreate` so on-premise (v2) keeps working.
-- **Two different search endpoints.** `pkg/jira/search.go` uses the newer `/search/jql` (Cloud, `maxResults` only) and the older paginated `/search?startAt=…&maxResults=…`. They page differently — match the one already used for the installation type rather than assuming `startAt` pagination everywhere.
-- **Epic fields are dynamic custom fields.** "Epic Name" / "Epic Link" map to instance-specific `customfield_*` IDs resolved from create metadata (`EpicField`). On non-English on-premise instances the older API doesn't return untranslated `issuetype` names, so `jira init` can't auto-resolve them — the user must hand-fill `epic.name`, `epic.link`, and `issue.types.*.handle` in the config (see README). Don't hard-code custom field IDs.
-- **Version vars are empty in source.** `internal/version` ships `Version = "v0.0.0-dev"`, `GitCommit = ""`; the real values are injected via `-ldflags` by `make build`/`make install` (and fall back to the Go module version). `go build` without the Makefile produces a dev-versioned binary — expected, not a bug.
-- **`go.mod` is authoritative for the Go version** (currently 1.25) over anything stated elsewhere. Deps are vendored, so run `make deps` (`go mod vendor`) after touching `go.mod` or CI/build will drift.
-- **Race tests need CGO.** `make test` sets `CGO_ENABLED=1`; a bare `go test -race ./...` with CGO disabled will fail to build the race detector.
-- **Timezones must be IANA strings.** Datetime parsing (`cmdutil.DateStringToJiraFormatInLocation`) uses `time.LoadLocation` and rejects anything that isn't a valid IANA zone (e.g. `Europe/Berlin`), not offsets like `+05:00`.
-- **Config home respects `XDG_CONFIG_HOME`.** `cmdutil.GetConfigHome()` returns `$XDG_CONFIG_HOME` if set, otherwise `~/.config`; the config then lives under `<home>/.jira/.config.yml`. Don't assume `~/.config`.
+Epic fields resolve per instance from create metadata. On non-English `Local` instances the older API omits untranslated `issuetype` names, so `jira init` cannot resolve them and the user hand-fills `epic.name`, `epic.link`, and the type handles (see README). Resolve these IDs from metadata or config.
 
 ## Conventions
 
-- Each subcommand package exposes a single `NewCmd<Name>() *cobra.Command` constructor; flags are defined there and read back via `internal/query`.
-- Errors bound for the user go through `cmdutil.Failed(...)` (prints and exits); library errors in `pkg/jira` are returned as typed errors.
-- New API interactions belong in `pkg/jira`, with a sibling `_test.go` using `testdata/` JSON fixtures — never embed HTTP calls in command code.
+- One `NewCmd<Name>() *cobra.Command` per subcommand package; define flags there and read them back through `internal/query`.
+- User-facing failures go through `cmdutil.Failed(...)`, which prints and exits; `pkg/jira` returns typed errors instead.
+- New API interactions belong in `pkg/jira` with a sibling `_test.go` over `testdata/` JSON — keep HTTP out of command code.
+- Build, lint, and test through the Makefile; it is the source of truth for tool versions and flags.
